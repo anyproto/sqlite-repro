@@ -10,13 +10,14 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync"
-	"syscall"
 	"unsafe"
 
 	"modernc.org/libc"
 	"modernc.org/libc/sys/types"
+	"modernc.org/sqlite"
 	_ "modernc.org/sqlite"
 	sqlite3 "modernc.org/sqlite/lib"
 )
@@ -28,19 +29,44 @@ func init() {
 	go runPPROF()
 }
 
+var conns []uintptr
+
 func run() {
+	driver := sqlite.Driver{}
+	driver.RegisterConnectionHook(func(conn sqlite.ExecQuerierContext, dsn string) error {
+		// extract db from conn with reflection
+		dbPtr := uintptr(reflect.ValueOf(conn).Elem().FieldByName("db").Uint())
+		conns = append(conns, dbPtr)
+		return nil
+	})
+	sql.Register("sqlite2", &driver)
+
+	tls := libc.NewTLS()
+
 	wg := sync.WaitGroup{}
+	var closeFuncs []func() error
 	for i := 0; i < 10; i++ {
 		wg.Add(1)
 		go func() {
-			err := createAndTestDb(10000, 10)
+			err, closeFunc := createAndTestDb(10000, 10)
 			if err != nil {
 				panic(err)
 			}
+			closeFuncs = append(closeFuncs, closeFunc)
 			wg.Done()
 		}()
 	}
 	wg.Wait()
+	printSqliteMemoryUsageForAllDbs(tls)
+
+	ch := make(chan os.Signal, 1)
+	signal.Notify(ch, os.Interrupt, os.Kill)
+	<-ch
+	for _, closeFunc := range closeFuncs {
+		if err := closeFunc(); err != nil {
+			panic(err)
+		}
+	}
 }
 
 func main() {
@@ -48,30 +74,30 @@ func main() {
 	run()
 }
 
-func createAndTestDb(insertsN int, parallelSelects int) error {
+func createAndTestDb(insertsN int, parallelSelects int) (err error, close func() error) {
 	dir, err := os.MkdirTemp("", "test-*")
 	if err != nil {
-		return err
+		return err, nil
 	}
 
 	defer os.RemoveAll(dir)
 
 	fn := filepath.Join(dir, "db")
 
-	db, err := sql.Open("sqlite", fn)
+	db, err := sql.Open("sqlite2", fn)
 	if err != nil {
-		return err
+		return err, nil
 	}
 
 	if _, err = db.Exec(`
 drop table if exists t;
 create table t(i int, str text);
 `); err != nil {
-		return err
+		return err, nil
 	}
 
 	if err = inserts(db, insertsN, 100, 10, 1000); err != nil {
-		return err
+		return err, nil
 	}
 	fmt.Println("inserts done")
 	expvar.Do(func(kv expvar.KeyValue) {
@@ -83,9 +109,9 @@ create table t(i int, str text);
 	wg := sync.WaitGroup{}
 	for i := 0; i < parallelSelects; i++ {
 		wg.Add(1)
-		roDb, err := sql.Open("sqlite", fn+"?mode=ro")
+		roDb, err := sql.Open("sqlite2", fn+"?mode=ro")
 		if err != nil {
-			return err
+			return err, nil
 		}
 		roDbs = append(roDbs, roDb)
 		go func() {
@@ -94,19 +120,63 @@ create table t(i int, str text);
 				panic(err)
 			}
 			fmt.Println("selects done")
+
 		}()
 	}
 	wg.Wait()
 
-	c := make(chan os.Signal, 1)
-	signal.Notify(c, os.Interrupt, syscall.SIGTERM)
-	<-c
-	for _, roDb := range roDbs {
-		roDb.Close()
-	}
-	db.Close()
+	return nil, func() error {
+		for _, roDb := range roDbs {
+			err = roDb.Close()
+			if err != nil {
+				return err
+			}
+		}
+		return db.Close()
 
-	return nil
+	}
+}
+
+func printSqliteMemoryUsageForAllDbs(tls *libc.TLS) {
+	totalPerOp := make(map[int32]int64)
+
+	for _, db := range conns {
+		var ops = []int32{
+			sqlite3.SQLITE_DBSTATUS_CACHE_USED,
+			sqlite3.SQLITE_DBSTATUS_LOOKASIDE_USED,
+			sqlite3.SQLITE_DBSTATUS_SCHEMA_USED,
+			sqlite3.SQLITE_DBSTATUS_STMT_USED,
+			sqlite3.SQLITE_DBSTATUS_CACHE_SPILL,
+		}
+		for _, op := range ops {
+			var current, highwater int32
+			retCode := sqlite3.Xsqlite3_db_status(tls, db, op, uintptr(unsafe.Pointer(&current)), uintptr(unsafe.Pointer(&highwater)), 0)
+			if retCode != sqlite3.SQLITE_OK {
+				panic(fmt.Errorf("sqlite: db status: %v", retCode))
+			}
+			//fmt.Printf("sqlite: db status: %v: current=%v, highwater=%v\n", op, current, highwater)
+			totalPerOp[op] += int64(current)
+		}
+	}
+	for op, total := range totalPerOp {
+		var opStr string
+		switch op {
+		case sqlite3.SQLITE_DBSTATUS_CACHE_USED:
+			opStr = "CACHE_USED"
+		case sqlite3.SQLITE_DBSTATUS_LOOKASIDE_USED:
+			opStr = "LOOKASIDE_USED"
+		case sqlite3.SQLITE_DBSTATUS_SCHEMA_USED:
+			opStr = "SCHEMA_USED"
+		case sqlite3.SQLITE_DBSTATUS_STMT_USED:
+			opStr = "STMT_USED"
+		case sqlite3.SQLITE_DBSTATUS_CACHE_SPILL:
+			opStr = "CACHE_SPILL"
+		default:
+			opStr = fmt.Sprintf("%v", op)
+
+		}
+		fmt.Printf("sqlite: db status: %v: %v\n", opStr, total)
+	}
 }
 
 // create a lot of inserts

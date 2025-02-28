@@ -99,7 +99,7 @@ create table t(i int, str text);
 	if err = inserts(db, insertsN, 100, 10, 1000); err != nil {
 		return err, nil
 	}
-	fmt.Println("inserts done")
+	//fmt.Println("inserts done")
 	expvar.Do(func(kv expvar.KeyValue) {
 		if strings.HasPrefix(kv.Key, "allocator") {
 			fmt.Println(kv.Value.String())
@@ -119,7 +119,7 @@ create table t(i int, str text);
 			if err = selects(roDb, insertsN); err != nil {
 				panic(err)
 			}
-			fmt.Println("selects done")
+			//	fmt.Println("selects done")
 
 		}()
 	}

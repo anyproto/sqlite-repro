@@ -2,7 +2,6 @@ package main
 
 import (
 	"database/sql"
-	"expvar"
 	"fmt"
 	"math/rand"
 	"net/http"
@@ -11,7 +10,6 @@ import (
 	"os/signal"
 	"path/filepath"
 	"reflect"
-	"strings"
 	"sync"
 	"unsafe"
 
@@ -29,13 +27,16 @@ func init() {
 	go runPPROF()
 }
 
-var conns []uintptr
-
 func run() {
+	mu := sync.Mutex{}
+	var conns []uintptr
+
 	driver := sqlite.Driver{}
 	driver.RegisterConnectionHook(func(conn sqlite.ExecQuerierContext, dsn string) error {
 		// extract db from conn with reflection
 		dbPtr := uintptr(reflect.ValueOf(conn).Elem().FieldByName("db").Uint())
+		mu.Lock()
+		defer mu.Unlock()
 		conns = append(conns, dbPtr)
 		return nil
 	})
@@ -52,12 +53,15 @@ func run() {
 			if err != nil {
 				panic(err)
 			}
+			mu.Lock()
 			closeFuncs = append(closeFuncs, closeFunc)
+			mu.Unlock()
 			wg.Done()
 		}()
 	}
 	wg.Wait()
-	printSqliteMemoryUsageForAllDbs(tls)
+
+	printSqliteMemoryUsageForAllDbs(tls, conns)
 
 	ch := make(chan os.Signal, 1)
 	signal.Notify(ch, os.Interrupt, os.Kill)
@@ -100,11 +104,7 @@ create table t(i int, str text);
 		return err, nil
 	}
 	//fmt.Println("inserts done")
-	expvar.Do(func(kv expvar.KeyValue) {
-		if strings.HasPrefix(kv.Key, "allocator") {
-			fmt.Println(kv.Value.String())
-		}
-	})
+
 	var roDbs []*sql.DB
 	wg := sync.WaitGroup{}
 	for i := 0; i < parallelSelects; i++ {
@@ -137,8 +137,23 @@ create table t(i int, str text);
 	}
 }
 
-func printSqliteMemoryUsageForAllDbs(tls *libc.TLS) {
+func printSqliteMemoryUsageForAllDbs(tls *libc.TLS, conns []uintptr) {
 	totalPerOp := make(map[int32]int64)
+
+	type dbStats struct {
+		current   int32
+		highwater int32
+	}
+
+	memPtr := libc.Xmalloc(tls, types.Size_t(unsafe.Sizeof(dbStats{})))
+	if memPtr == 0 {
+		panic(fmt.Errorf("sqlite: cannot allocate memory"))
+	}
+	stats := (*dbStats)(unsafe.Pointer(memPtr))
+	defer func() {
+		stats = nil
+		libc.Xfree(tls, memPtr)
+	}()
 
 	for _, db := range conns {
 		var ops = []int32{
@@ -149,15 +164,19 @@ func printSqliteMemoryUsageForAllDbs(tls *libc.TLS) {
 			sqlite3.SQLITE_DBSTATUS_CACHE_SPILL,
 		}
 		for _, op := range ops {
-			var current, highwater int32
-			retCode := sqlite3.Xsqlite3_db_status(tls, db, op, uintptr(unsafe.Pointer(&current)), uintptr(unsafe.Pointer(&highwater)), 0)
+			stats.current = 0
+			stats.highwater = 0
+			retCode := sqlite3.Xsqlite3_db_status(tls, db, op, uintptr(unsafe.Pointer(&stats.current)),
+				uintptr(unsafe.Pointer(&stats.highwater)), 0)
 			if retCode != sqlite3.SQLITE_OK {
 				panic(fmt.Errorf("sqlite: db status: %v", retCode))
 			}
+
 			//fmt.Printf("sqlite: db status: %v: current=%v, highwater=%v\n", op, current, highwater)
-			totalPerOp[op] += int64(current)
+			totalPerOp[op] += int64(stats.current)
 		}
 	}
+	fmt.Println("sqlite: all connections aggregated statuses:")
 	for op, total := range totalPerOp {
 		var opStr string
 		switch op {
@@ -175,7 +194,7 @@ func printSqliteMemoryUsageForAllDbs(tls *libc.TLS) {
 			opStr = fmt.Sprintf("%v", op)
 
 		}
-		fmt.Printf("sqlite: db status: %v: %v\n", opStr, total)
+		fmt.Printf("%v: %v\n", opStr, total)
 	}
 }
 

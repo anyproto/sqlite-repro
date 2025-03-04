@@ -271,12 +271,19 @@ func preallocateCache() {
 		panic(fmt.Errorf("cannot allocate memory"))
 	}
 
-	var headerSize int32 // This will receive the header size from SQLite
+	varArgs = uintptr(unsafe.Pointer(&p))
+	headerSizeMem := libc.Xmalloc(tls, 4)
+	if headerSizeMem == 0 {
+		panic(fmt.Errorf("sqlite: cannot allocate memory for header size"))
+	}
+	defer libc.Xfree(tls, headerSizeMem)
+
+	*(*int32)(unsafe.Pointer(headerSizeMem)) = 0
 
 	// Create a va_list containing the pointer to headerSize.
 	// Unlike SQLITE_CONFIG_SMALL_MALLOC (which takes an int value),
 	// SQLITE_CONFIG_PCACHE_HDRSZ expects a pointer to an int.
-	varArgs2 := libc.NewVaList(uintptr(unsafe.Pointer(&headerSize)))
+	varArgs2 := libc.NewVaList(headerSizeMem)
 	if varArgs2 == 0 {
 		panic(fmt.Errorf("sqlite: get page cache header size: cannot allocate memory"))
 	}
@@ -294,6 +301,7 @@ func preallocateCache() {
 		panic(fmt.Errorf("sqlite: failed to configure mutex methods: %v", str))
 	}
 
+	headerSize := *(*int32)(unsafe.Pointer(headerSizeMem))
 	var sqlitePageSize int32 = 4096            // or your chosen SQLite page size
 	var sz int32 = sqlitePageSize + headerSize // 4104 bytes
 	var n int32 = pageCacheSize / sz           // number of cache lines

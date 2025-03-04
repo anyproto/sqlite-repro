@@ -10,6 +10,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"reflect"
+	"strconv"
 	"sync"
 	"unsafe"
 
@@ -75,7 +76,15 @@ func run() {
 
 func main() {
 	if len(os.Args) > 1 && os.Args[1] == "preallocate" {
-		preallocateCache()
+		if len(os.Args) != 3 {
+			fmt.Println("usage: preallocate <page-cache-size-bytes>")
+			os.Exit(1)
+		}
+		pageCacheSizeBytes, err := strconv.Atoi(os.Args[2])
+		if err != nil {
+			panic(err)
+		}
+		preallocateCache(int32(pageCacheSizeBytes))
 	}
 	run()
 }
@@ -256,16 +265,10 @@ func randomString(l int) string {
 	return string(b)
 }
 
-func preallocateCache() {
-	var pageCacheSize int32 = 1024 * 1024
+func preallocateCache(pageCacheSize int32) {
 	tls := libc.NewTLS()
 	if sqlite3.Xsqlite3_threadsafe(tls) == 0 {
 		panic(fmt.Errorf("sqlite: thread safety configuration error"))
-	}
-
-	varArgs := libc.Xmalloc(tls, types.Size_t(unsafe.Sizeof(uintptr(0))))
-	if varArgs == 0 {
-		panic(fmt.Errorf("cannot allocate memory"))
 	}
 
 	p := libc.Xmalloc(tls, types.Size_t(pageCacheSize))
@@ -273,7 +276,6 @@ func preallocateCache() {
 		panic(fmt.Errorf("cannot allocate memory"))
 	}
 
-	varArgs = uintptr(unsafe.Pointer(&p))
 	headerSizeMem := libc.Xmalloc(tls, 4)
 	if headerSizeMem == 0 {
 		panic(fmt.Errorf("sqlite: cannot allocate memory for header size"))
@@ -319,5 +321,4 @@ func preallocateCache() {
 		str := libc.GoString(p)
 		panic(fmt.Errorf("sqlite: failed to configure SQLITE_CONFIG_PAGECACHE: %v", str))
 	}
-	libc.Xfree(tls, varArgs)
 }

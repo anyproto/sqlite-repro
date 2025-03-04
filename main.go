@@ -74,7 +74,9 @@ func run() {
 }
 
 func main() {
-	//preallocateCache()
+	if len(os.Args) > 1 && os.Args[1] == "preallocate" {
+		preallocateCache()
+	}
 	run()
 }
 

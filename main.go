@@ -2,6 +2,7 @@ package main
 
 import (
 	"database/sql"
+	"expvar"
 	"fmt"
 	"math/rand"
 	"net/http"
@@ -64,6 +65,12 @@ func run() {
 
 	printSqliteMemoryUsageForAllDbs(tls, conns)
 
+	expvar.Do(func(kv expvar.KeyValue) {
+		if kv.Key == "memory.allocator" {
+			fmt.Println(kv.Value.String())
+		}
+	})
+	
 	ch := make(chan os.Signal, 1)
 	signal.Notify(ch, os.Interrupt, os.Kill)
 	<-ch

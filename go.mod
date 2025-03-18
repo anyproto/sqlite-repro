@@ -3,7 +3,7 @@ module sqlite-repro
 go 1.23.3
 
 require (
-	modernc.org/libc v1.61.13
+	modernc.org/libc v1.61.14-0.20250318182109-5257f95acdf2
 	modernc.org/sqlite v1.36.1
 )
 
